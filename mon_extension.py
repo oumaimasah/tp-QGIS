@@ -25,6 +25,8 @@ from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
 from qgis.core import QgsSettings
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsProject, QgsWkbTypes, QgsMapLayer
+
 
 # Import the code for the dialog
 from .mon_extension_dialog import MonExtensionDialog
@@ -96,8 +98,7 @@ class MonExtension:
         """Add a toolbar icon to the toolbar.
 
         :param icon_path: Path to the icon for this action. Can be a resource
-            path (e.g. ':/plugins/foo/bar.png') or a normal file system path.
-        :type icon_path: str
+            path (e.g. ':/from qgis.core import QgsProject, QgsWkbTypestr
 
         :param text: Text that should be shown in menu items for this action.
         :type text: str
@@ -188,6 +189,14 @@ class MonExtension:
             self.first_start = False
             self.dlg = MonExtensionDialog()
 
+ # Parcourir toutes les couches du projet
+    for layer in QgsProject.instance().mapLayers().values():
+        if layer.type() == QgsMapLayer.VectorLayer:
+            if layer.geometryType() == QgsWkbTypes.PointGeometry:
+            self.dlg.comboBox.addItem(layer.name(), layer.id())
+
+ 
+
         # show the dialog
         self.dlg.show()
         # Run the dialog event loop
@@ -197,3 +206,6 @@ class MonExtension:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
             pass
+
+
+   
