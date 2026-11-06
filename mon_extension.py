@@ -27,7 +27,7 @@ import requests
 
 from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon, QIntValidator
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QDialogButtonBox
 from qgis.core import (
     Qgis, QgsSettings, QgsProject,QgsWkbTypes, QgsVectorLayer,QgsGeometry, QgsFeature, QgsFeatureRequest,QgsFillSymbol,
     QgsCoordinateReferenceSystem,
@@ -91,6 +91,7 @@ class MonExtension:
         self.pointTool = None
         self.idCoucheTampon = None   # identifiant de la couche "Zone tampon"
         self.dernierPoint = None     # dernier point cliqué (CRS du canevas)
+        self.outilPrecedent = None   # outil actif avant le lancement de l'extension
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -204,17 +205,15 @@ class MonExtension:
                 action)
             self.iface.removeToolBarIcon(action)
 
-        if self.canvas is not None and self.pointTool is not None:
-            self.canvas.unsetMapTool(self.pointTool)
+        # Déchargement de l'extension : on nettoie tout (couche tampon comprise)
+        self.supprimerCoucheTampon()
 
         if self.dlg is not None:
-            self.dlg.close()
+            self.dlg.close()   # déclenche fermerDialogue() -> réactive l'outil précédent
             self.dlg = None
 
-        # Suppression de la couche tampon si elle existe encore
-        if self.idCoucheTampon and QgsProject.instance().mapLayer(self.idCoucheTampon):
-            QgsProject.instance().removeMapLayer(self.idCoucheTampon)
-        self.idCoucheTampon = None
+        if self.canvas is not None and self.pointTool is not None:
+            self.canvas.unsetMapTool(self.pointTool)
 
    
     def run(self):
@@ -227,7 +226,12 @@ class MonExtension:
             # Recalcul automatique si on change la distance ou la couche
             self.dlg.lineEditDistance.editingFinished.connect(self.recalculer)
             self.dlg.comboBox.currentIndexChanged.connect(self.recalculer)
-            # Désactivation de l'outil quand la fenêtre est fermée
+            # Bouton "Annuler" (seul bouton de l'interface) : ferme ET supprime la couche tampon
+            bouton_annuler = self.dlg.button_box.button(QDialogButtonBox.Cancel)
+            if bouton_annuler is not None:
+                bouton_annuler.setText("Annuler")
+            self.dlg.button_box.rejected.connect(self.annuler)
+            # Croix de la fenêtre ou touche Échap : ferme et CONSERVE la couche tampon
             self.dlg.finished.connect(self.fermerDialogue)
 
         # Remplissage de la liste avec les couches de points
@@ -239,6 +243,10 @@ class MonExtension:
         self.dlg.labelLatitude.setText("-")
         self.dlg.labelAdresse.setText("-")
         self.dlg.nbr_objet.setText("-")
+
+        # Mémorisation de l'outil actif avant le lancement (sauf si c'est déjà le nôtre)
+        if self.canvas.mapTool() is not self.pointTool:
+            self.outilPrecedent = self.canvas.mapTool()
 
         # Activation de l'outil de clic
         self.canvas.setMapTool(self.pointTool)
@@ -260,8 +268,46 @@ class MonExtension:
         combo.blockSignals(False)
 
     def fermerDialogue(self, result=None):
-        """Désactive l'outil de clic à la fermeture de la fenêtre."""
-        if self.canvas is not None and self.pointTool is not None:
+        """Fermeture par la croix ou la touche Échap (RG2).
+
+        La couche tampon est conservée dans le projet et l'outil actif
+        avant le lancement de l'extension est réactivé.
+        """
+        self.restaurerOutil()
+        # La couche reste dans le projet : l'extension ne la gère plus.
+        # Au prochain lancement, une nouvelle couche sera créée.
+        self.idCoucheTampon = None
+
+    def annuler(self):
+        """Clic sur le bouton "Annuler" (RG3).
+
+        La couche tampon est supprimée du projet, puis la fenêtre est fermée
+        (fermerDialogue réactive l'outil actif avant le lancement).
+        """
+        self.supprimerCoucheTampon()
+        if self.dlg is not None:
+            self.dlg.reject()
+
+    def supprimerCoucheTampon(self):
+        """Supprime la couche tampon du projet si elle existe."""
+        projet = QgsProject.instance()
+        if self.idCoucheTampon and projet.mapLayer(self.idCoucheTampon):
+            projet.removeMapLayer(self.idCoucheTampon)
+        self.idCoucheTampon = None
+
+    def restaurerOutil(self):
+        """Réactive l'outil qui était actif avant le lancement de l'extension."""
+        if self.canvas is None:
+            return
+        outil = self.outilPrecedent
+        self.outilPrecedent = None
+        if outil is not None:
+            try:
+                self.canvas.setMapTool(outil)   # désactive automatiquement notre outil
+                return
+            except RuntimeError:
+                pass   # l'outil précédent n'existe plus
+        if self.pointTool is not None:
             self.canvas.unsetMapTool(self.pointTool)
 
   

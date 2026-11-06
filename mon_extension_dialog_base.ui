@@ -17,7 +17,7 @@
    </size>
   </property>
   <property name="windowTitle">
-   <string>Mon Extension</string>
+   <string>Plugin QGIS</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayoutPrincipal">
    <property name="spacing">
