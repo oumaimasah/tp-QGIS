@@ -441,9 +441,11 @@ class MonExtension:
         if couche is None:
             couche = QgsVectorLayer("Polygon?crs=EPSG:2154", "Zone tampon", "memory")
             symbole = QgsFillSymbol.createSimple({
-                "style": "no",
-                "outline_color": "#000000",
-                "outline_width": "0.30"
+                'color': '211,211,211,100',  
+                'style': 'solid',            
+                'outline_color': '#000000',  
+                'outline_width': '0.30',    
+                'outline_style': 'solid'
             })
             couche.renderer().setSymbol(symbole)
             projet.addMapLayer(couche)
