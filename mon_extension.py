@@ -21,11 +21,13 @@
  *                                                                         *
  ***************************************************************************/
 """
+from typing import Self
+
 from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
-from qgis.core import QgsSettings
+from qgis.core import QgsMapLayer, QgsProject, QgsSettings, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from qgis.core import QgsProject, QgsWkbTypes, QgsMapLayer
+from qgis.gui import QgsMapToolEmitPoint
 
 
 # Import the code for the dialog
@@ -98,7 +100,8 @@ class MonExtension:
         """Add a toolbar icon to the toolbar.
 
         :param icon_path: Path to the icon for this action. Can be a resource
-            path (e.g. ':/from qgis.core import QgsProject, QgsWkbTypestr
+            path (e.g. ':/plugins/foo/bar.png') or a normal file system path.
+        :type icon_path: str
 
         :param text: Text that should be shown in menu items for this action.
         :type text: str
@@ -117,7 +120,7 @@ class MonExtension:
         :param add_to_toolbar: Flag indicating whether the action should also
             be added to the toolbar. Defaults to True.
         :type add_to_toolbar: bool
-
+y
         :param status_tip: Optional text to show in a popup when mouse pointer
             hovers over the action.
         :type status_tip: str
@@ -180,6 +183,7 @@ class MonExtension:
             self.iface.removeToolBarIcon(action)
 
 
+    
     def run(self):
         """Run method that performs all the real work"""
 
@@ -189,23 +193,46 @@ class MonExtension:
             self.first_start = False
             self.dlg = MonExtensionDialog()
 
- # Parcourir toutes les couches du projet
-    for layer in QgsProject.instance().mapLayers().values():
-        if layer.type() == QgsMapLayer.VectorLayer:
+        for layer in QgsProject.instance().mapLayers().values():
+          if layer.type() == QgsMapLayer.VectorLayer:
             if layer.geometryType() == QgsWkbTypes.PointGeometry:
-            self.dlg.comboBox.addItem(layer.name(), layer.id())
+              self.dlg.comboBox.addItem(layer.name())
 
- 
-
-        # show the dialog
+ # --- ACTIVATION DE L'OUTIL DE CLIC (UNIQUEMENT ICI) ---
+        self.canvas = self.iface.mapCanvas()
+        self.pointTool = QgsMapToolEmitPoint(self.canvas)
+        self.pointTool.canvasClicked.connect(self.displayPoint)
+        self.canvas.setMapTool(self.pointTool)
+     # ------------------------------------------------------
+     
+    # show the dialog
         self.dlg.show()
-        # Run the dialog event loop
+    # Run the dialog event loop
         result = self.dlg.exec_()
-        # See if OK was pressed
+    # See if OK was pressed
         if result:
             # Do something useful here - delete the line containing pass and
             # substitute with your code.
             pass
 
+     
+    def displayPoint(self, point, button):
+        """
+    Méthode appelée à chaque clic sur la carte.
+        """
+    # Definir la source (CRS actuel du canevas) et la cible (WGS 84)
+        source_crs = self.canvas.mapSettings().destinationCrs()
+        dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
 
-   
+    # 2. Configurer la transformation de coordonnées
+        xform = QgsCoordinateTransform(source_crs, dest_crs, QgsProject.instance())
+  
+    # 3. Transformer le QgsPointXY du clic
+        point_wgs84 = xform.transform(point)
+
+    # 4. Afficher les résultats dans les labels (avec la bonne variable point_wgs84)
+        self.dlg.labelLongitude.setText(f"{point_wgs84.x():.5f}")
+        self.dlg.labelLatitude.setText(f"{point_wgs84.y():.5f}")
+
+
+        

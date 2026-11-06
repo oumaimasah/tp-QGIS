@@ -26,7 +26,6 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt import QtWidgets
-from qgis.core import QgsProject
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(
@@ -47,10 +46,3 @@ class MonExtensionDialog(QtWidgets.QDialog, FORM_CLASS):
         # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
-
-
-
-self.dlg.comboBox.clear()
-    layers = QgsProject.instance().mapLayers().values()
-        for layer in layers:
-  self.dlg.comboBox_couches.addItem(Station Vélib(), layer.id())
