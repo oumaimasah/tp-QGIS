@@ -24,11 +24,13 @@
 from typing import Self
 
 from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
-from qgis.core import QgsMapLayer, QgsProject, QgsSettings, QgsWkbTypes, QgsCoordinateReferenceSystem, QgsCoordinateTransform
+from qgis.core import QgsSettings
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsProject, QgsWkbTypes, QgsMapLayer
 from qgis.gui import QgsMapToolEmitPoint
-
+from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY, QgsFeature, QgsFillSymbol
+import requests
 
 # Import the code for the dialog
 from .mon_extension_dialog import MonExtensionDialog
@@ -236,3 +238,40 @@ y
 
 
         
+# 4. Requête vers le service de géocodage inverse de la Géoplateforme IGN (RG1)
+        url = "https://data.geopf.fr/geocodage/reverse"
+        parametres = {
+            "lon": point_wgs84.x(),
+            "lat": point_wgs84.y(),
+            "type": "housenumber",
+            "limit": 1
+        }
+        
+        try:
+            # On passe bien les paramètres à la requête get
+            response = requests.get(url, params=parametres)
+            if response.status_code == 200:
+                data = response.json()
+                features = data.get("features", [])
+
+                if features:
+                    properties = features[0].get("properties", {})
+
+                    # 5. Extraction des champs demandés (RG2)
+                    numero_voie = properties.get("housenumber", "")  # Numéro dans la voie
+                    nom_voie = properties.get("street", "")          # Type et nom de la voie
+                    code_insee = properties.get("citycode", "")      # Code INSEE de la commune
+                    nom_commune = properties.get("city", "")         # Nom de la commune
+
+                    # Affichage direct dans le label de l'interface graphique
+                    adresse_complete = f"{numero_voie} {nom_voie}, {code_insee} {nom_commune}"
+                    self.dlg.labelAdresse.setText(adresse_complete)
+                else:
+                    self.dlg.labelAdresse.setText("Aucune adresse trouvée")
+            else:
+                self.dlg.labelAdresse.setText("Erreur de service IGN")
+                
+        except Exception as e:
+            self.dlg.labelAdresse.setText("Erreur de connexion")
+
+       
