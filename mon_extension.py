@@ -21,20 +21,37 @@
  *                                                                         *
  ***************************************************************************/
 """
-from typing import Self
+import os.path
+
+import requests
 
 from qgis.PyQt.QtCore import QLocale, QTranslator, QCoreApplication
-from qgis.core import QgsSettings
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QIntValidator
 from qgis.PyQt.QtWidgets import QAction
-from qgis.core import QgsProject, QgsWkbTypes, QgsMapLayer
+from qgis.core import (
+    Qgis, QgsSettings, QgsProject,QgsWkbTypes, QgsVectorLayer,QgsGeometry, QgsFeature, QgsFeatureRequest,QgsFillSymbol,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+)
 from qgis.gui import QgsMapToolEmitPoint
-from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY, QgsFeature, QgsFillSymbol
-import requests
 
 # Import the code for the dialog
 from .mon_extension_dialog import MonExtensionDialog
-import os.path
+
+# Compatibilité entre les différentes versions de QGIS
+try:
+    NIVEAU_CRITIQUE = Qgis.MessageLevel.Critical
+    NIVEAU_ALERTE = Qgis.MessageLevel.Warning
+except AttributeError:
+    NIVEAU_CRITIQUE = Qgis.Critical
+    NIVEAU_ALERTE = Qgis.Warning
+
+try:
+    GEOMETRIE_POINT = Qgis.GeometryType.Point
+except AttributeError:
+    GEOMETRIE_POINT = QgsWkbTypes.PointGeometry
+
+URL_GEOCODAGE_INVERSE = "https://data.geopf.fr/geocodage/reverse"
 
 
 class MonExtension:
@@ -68,9 +85,12 @@ class MonExtension:
         self.actions = []
         self.menu = self.tr(u'&MonExtension')
 
-        # Check if plugin was started the first time in current QGIS session
-        # Must be set in initGui() to survive plugin reloads
-        self.first_start = None
+        # Attributs propres à l'extension
+        self.dlg = None
+        self.canvas = None
+        self.pointTool = None
+        self.idCoucheTampon = None   # identifiant de la couche "Zone tampon"
+        self.dernierPoint = None     # dernier point cliqué (CRS du canevas)
 
     # noinspection PyMethodMayBeStatic
     def tr(self, message):
@@ -87,18 +107,17 @@ class MonExtension:
         # noinspection PyTypeChecker,PyArgumentList,PyCallByClass
         return QCoreApplication.translate('MonExtension', message)
 
-
     def add_action(
-        self,
-        icon_path,
-        text,
-        callback,
-        enabled_flag=True,
-        add_to_menu=True,
-        add_to_toolbar=True,
-        status_tip=None,
-        whats_this=None,
-        parent=None):
+            self,
+            icon_path,
+            text,
+            callback,
+            enabled_flag=True,
+            add_to_menu=True,
+            add_to_toolbar=True,
+            status_tip=None,
+            whats_this=None,
+            parent=None):
         """Add a toolbar icon to the toolbar.
 
         :param icon_path: Path to the icon for this action. Can be a resource
@@ -122,7 +141,7 @@ class MonExtension:
         :param add_to_toolbar: Flag indicating whether the action should also
             be added to the toolbar. Defaults to True.
         :type add_to_toolbar: bool
-y
+
         :param status_tip: Optional text to show in a popup when mouse pointer
             hovers over the action.
         :type status_tip: str
@@ -168,13 +187,14 @@ y
         icon_path = os.path.join(os.path.dirname(__file__), 'icon.png')
         self.add_action(
             icon_path,
-            text=self.tr(u''),
+            text=self.tr(u'MonExtension'),
             callback=self.run,
             parent=self.iface.mainWindow())
 
-        # will be set False in run()
-        self.first_start = True
-
+        # Outil de clic sur la carte : créé une seule fois, connecté une seule fois
+        self.canvas = self.iface.mapCanvas()
+        self.pointTool = QgsMapToolEmitPoint(self.canvas)
+        self.pointTool.canvasClicked.connect(self.displayPoint)
 
     def unload(self):
         """Removes the plugin menu item and icon from QGIS GUI."""
@@ -184,94 +204,217 @@ y
                 action)
             self.iface.removeToolBarIcon(action)
 
+        if self.canvas is not None and self.pointTool is not None:
+            self.canvas.unsetMapTool(self.pointTool)
 
-    
+        if self.dlg is not None:
+            self.dlg.close()
+            self.dlg = None
+
+        # Suppression de la couche tampon si elle existe encore
+        if self.idCoucheTampon and QgsProject.instance().mapLayer(self.idCoucheTampon):
+            QgsProject.instance().removeMapLayer(self.idCoucheTampon)
+        self.idCoucheTampon = None
+
+   
     def run(self):
-        """Run method that performs all the real work"""
+        """Ouvre la fenêtre (non modale) et active l'outil de clic."""
 
-        # Create the dialog with elements (after translation) and keep reference
-        # Only create GUI ONCE in callback, so that it will only load when the plugin is started
-        if self.first_start == True:
-            self.first_start = False
-            self.dlg = MonExtensionDialog()
+        # Création de la fenêtre une seule fois
+        if self.dlg is None:
+            self.dlg = MonExtensionDialog(self.iface.mainWindow())
+            self.dlg.lineEditDistance.setValidator(QIntValidator(0, 1000000, self.dlg))
+            # Recalcul automatique si on change la distance ou la couche
+            self.dlg.lineEditDistance.editingFinished.connect(self.recalculer)
+            self.dlg.comboBox.currentIndexChanged.connect(self.recalculer)
+            # Désactivation de l'outil quand la fenêtre est fermée
+            self.dlg.finished.connect(self.fermerDialogue)
 
-        for layer in QgsProject.instance().mapLayers().values():
-          if layer.type() == QgsMapLayer.VectorLayer:
-            if layer.geometryType() == QgsWkbTypes.PointGeometry:
-              self.dlg.comboBox.addItem(layer.name())
+        # Remplissage de la liste avec les couches de points
+        self.remplirListeCouches()
 
- # --- ACTIVATION DE L'OUTIL DE CLIC (UNIQUEMENT ICI) ---
-        self.canvas = self.iface.mapCanvas()
-        self.pointTool = QgsMapToolEmitPoint(self.canvas)
-        self.pointTool.canvasClicked.connect(self.displayPoint)
+        # Réinitialisation de l'affichage
+        self.dernierPoint = None
+        self.dlg.labelLongitude.setText("-")
+        self.dlg.labelLatitude.setText("-")
+        self.dlg.labelAdresse.setText("-")
+        self.dlg.nbr_objet.setText("-")
+
+        # Activation de l'outil de clic
         self.canvas.setMapTool(self.pointTool)
-     # ------------------------------------------------------
-     
-    # show the dialog
-        self.dlg.show()
-    # Run the dialog event loop
-        result = self.dlg.exec_()
-    # See if OK was pressed
-        if result:
-            # Do something useful here - delete the line containing pass and
-            # substitute with your code.
-            pass
 
-     
+        # Fenêtre NON modale : sinon il serait impossible de cliquer sur la carte
+        self.dlg.show()
+        self.dlg.raise_()
+        self.dlg.activateWindow()
+
+    def remplirListeCouches(self):
+        """Ajoute dans la liste déroulante toutes les couches vectorielles de points."""
+        combo = self.dlg.comboBox
+        combo.blockSignals(True)
+        combo.clear()
+        for layer in QgsProject.instance().mapLayers().values():
+            if isinstance(layer, QgsVectorLayer) and layer.geometryType() == GEOMETRIE_POINT:
+                # On stocke l'identifiant de la couche (le nom peut être en double)
+                combo.addItem(layer.name(), layer.id())
+        combo.blockSignals(False)
+
+    def fermerDialogue(self, result=None):
+        """Désactive l'outil de clic à la fermeture de la fenêtre."""
+        if self.canvas is not None and self.pointTool is not None:
+            self.canvas.unsetMapTool(self.pointTool)
+
+  
     def displayPoint(self, point, button):
-        """
-    Méthode appelée à chaque clic sur la carte.
-        """
-    # Definir la source (CRS actuel du canevas) et la cible (WGS 84)
+        """Méthode appelée à chaque clic sur la carte."""
+        if self.dlg is None or not self.dlg.isVisible():
+            return
+
+        self.dernierPoint = QgsPointXYCopy(point)
+
+        # Source : CRS du canevas ; cible : WGS 84
         source_crs = self.canvas.mapSettings().destinationCrs()
         dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-
-    # 2. Configurer la transformation de coordonnées
         xform = QgsCoordinateTransform(source_crs, dest_crs, QgsProject.instance())
-  
-    # 3. Transformer le QgsPointXY du clic
         point_wgs84 = xform.transform(point)
 
-    # 4. Afficher les résultats dans les labels (avec la bonne variable point_wgs84)
         self.dlg.labelLongitude.setText(f"{point_wgs84.x():.5f}")
         self.dlg.labelLatitude.setText(f"{point_wgs84.y():.5f}")
 
+        # Géocodage inverse (Géoplateforme IGN)
+        self.dlg.labelAdresse.setText(self.rechercherAdresse(point_wgs84.x(), point_wgs84.y()))
 
-        
-# 4. Requête vers le service de géocodage inverse de la Géoplateforme IGN (RG1)
-        url = "https://data.geopf.fr/geocodage/reverse"
+        # Comptage des objets autour du point cliqué
+        self.compterObjets(point)
+
+    def rechercherAdresse(self, lon, lat):
+        """Retourne l'adresse la plus proche : 'numéro voie, code INSEE commune'."""
         parametres = {
-            "lon": point_wgs84.x(),
-            "lat": point_wgs84.y(),
+            "lon": lon,
+            "lat": lat,
+            "index": "address",
             "type": "housenumber",
-            "limit": 1
+            "limit": 1,
         }
-        
         try:
-            # On passe bien les paramètres à la requête get
-            response = requests.get(url, params=parametres)
-            if response.status_code == 200:
-                data = response.json()
-                features = data.get("features", [])
+            response = requests.get(URL_GEOCODAGE_INVERSE, params=parametres, timeout=10)
+            if response.status_code != 200:
+                return "Erreur de service IGN"
 
-                if features:
-                    properties = features[0].get("properties", {})
+            features = response.json().get("features", [])
+            if not features:
+                return "Aucune adresse trouvée"
 
-                    # 5. Extraction des champs demandés (RG2)
-                    numero_voie = properties.get("housenumber", "")  # Numéro dans la voie
-                    nom_voie = properties.get("street", "")          # Type et nom de la voie
-                    code_insee = properties.get("citycode", "")      # Code INSEE de la commune
-                    nom_commune = properties.get("city", "")         # Nom de la commune
+            props = features[0].get("properties", {})
+            numero_voie = props.get("housenumber", "")   # numéro dans la voie
+            nom_voie = props.get("street", "")           # type et nom de la voie
+            code_insee = props.get("citycode", "")       # code INSEE de la commune
+            nom_commune = props.get("city", "")          # nom de la commune
 
-                    # Affichage direct dans le label de l'interface graphique
-                    adresse_complete = f"{numero_voie} {nom_voie}, {code_insee} {nom_commune}"
-                    self.dlg.labelAdresse.setText(adresse_complete)
-                else:
-                    self.dlg.labelAdresse.setText("Aucune adresse trouvée")
-            else:
-                self.dlg.labelAdresse.setText("Erreur de service IGN")
-                
-        except Exception as e:
-            self.dlg.labelAdresse.setText("Erreur de connexion")
+            voie = f"{numero_voie} {nom_voie}".strip()
+            commune = f"{code_insee} {nom_commune}".strip()
+            return f"{voie}, {commune}"
 
-       
+        except Exception:
+            return "Erreur de connexion"
+
+
+    def recalculer(self, *args):
+        """Relance le comptage avec le dernier point cliqué (si il y en a un)."""
+        if self.dernierPoint is not None:
+            self.compterObjets(self.dernierPoint)
+
+    def compterObjets(self, point):
+        """Compte les objets de la couche choisie situés à moins de 'distance' mètres du point."""
+
+        # 1. Lecture et validation de la distance
+        try:
+            distance = int(self.dlg.lineEditDistance.text())
+            if distance < 0:
+                raise ValueError
+        except ValueError:
+            self.iface.messageBar().pushMessage(
+                "Mon Extension",
+                "La distance doit être un nombre entier positif.",
+                level=NIVEAU_CRITIQUE,
+                duration=5
+            )
+            self.dlg.nbr_objet.setText("-")
+            return
+
+        # 2. Récupération de la couche sélectionnée
+        projet = QgsProject.instance()
+        id_couche = self.dlg.comboBox.currentData()
+        couche = projet.mapLayer(id_couche) if id_couche else None
+
+        if couche is None:
+            self.iface.messageBar().pushMessage(
+                "Mon Extension",
+                "Aucune couche de points sélectionnée.",
+                level=NIVEAU_ALERTE,
+                duration=5
+            )
+            self.dlg.nbr_objet.setText("-")
+            return
+
+        # 3. Systèmes de coordonnées (calcul en Lambert 93 pour avoir des mètres)
+        crs_canevas = self.canvas.mapSettings().destinationCrs()
+        crs_metrique = QgsCoordinateReferenceSystem("EPSG:2154")
+        vers_metrique = QgsCoordinateTransform(crs_canevas, crs_metrique, projet)
+
+        # 4. Transformation du point vers Lambert 93
+        point_metrique = vers_metrique.transform(point)
+
+        # 5. Création de la zone tampon
+        zone_tampon = QgsGeometry.fromPointXY(point_metrique).buffer(distance, 32)
+
+        # 6. Affichage de la zone tampon
+        self.afficherZoneTampon(zone_tampon)
+
+        # 7. Transformation du tampon vers le CRS de la couche
+        tampon_crs_couche = QgsGeometry(zone_tampon)
+        vers_couche = QgsCoordinateTransform(crs_metrique, couche.crs(), projet)
+        tampon_crs_couche.transform(vers_couche)
+
+        # 8. Recherche des objets situés dans le tampon
+        requete = QgsFeatureRequest().setFilterRect(tampon_crs_couche.boundingBox())
+        nombre = sum(
+            1
+            for objet in couche.getFeatures(requete)
+            if objet.hasGeometry() and objet.geometry().intersects(tampon_crs_couche)
+        )
+
+        # 9. Affichage du nombre d'objets
+        self.dlg.nbr_objet.setText(str(nombre))
+
+    def afficherZoneTampon(self, zone_tampon):
+        """Affiche (ou met à jour) la zone tampon dans une couche temporaire."""
+        projet = QgsProject.instance()
+        couche = projet.mapLayer(self.idCoucheTampon) if self.idCoucheTampon else None
+
+        if couche is None:
+            couche = QgsVectorLayer("Polygon?crs=EPSG:2154", "Zone tampon", "memory")
+            symbole = QgsFillSymbol.createSimple({
+                "style": "no",
+                "outline_color": "#000000",
+                "outline_width": "0.30"
+            })
+            couche.renderer().setSymbol(symbole)
+            projet.addMapLayer(couche)
+            self.idCoucheTampon = couche.id()
+
+        fournisseur = couche.dataProvider()
+        fournisseur.truncate()
+
+        objet = QgsFeature()
+        objet.setGeometry(zone_tampon)
+        fournisseur.addFeatures([objet])
+
+        couche.updateExtents()
+        couche.triggerRepaint()
+
+
+def QgsPointXYCopy(point):
+    """Copie le point cliqué (pour pouvoir le réutiliser plus tard)."""
+    from qgis.core import QgsPointXY
+    return QgsPointXY(point.x(), point.y())
